@@ -1,6 +1,6 @@
 # 猫眼《奥德赛》IMAX 场次监控
 
-定时监控 **猫眼** 上 **MOViE MOViE 影城（前滩太古里店）** 里电影 **《奥德赛》(The Odyssey, 2026)** 的 **IMAX 场次**，一旦出现新场次就通过 **QQ 邮箱** 通知你。
+定时监控 **猫眼** 上 **MOViE MOViE 影城（前滩太古里店）** 里电影 **《奥德赛》(The Odyssey, 2026)** 的 **IMAX 场次**，一旦出现新场次就通过 **QQ 邮箱** 和/或 **企业微信群机器人（微信推送）** 通知你。
 
 本项目是对 [taopiaopiao-monitor](../taopiaopiao-monitor) 的“换数据源”改造：把对接淘票票 `acs.m.taopiaopiao.com` 的排片接口，替换为对接猫眼 `m.maoyan.com` 的排片接口，其余监控/去重/邮件逻辑保持一致。
 
@@ -62,6 +62,27 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 >
 > 端口说明：脚本对 465 端口用 SSL，其它端口（如 587）自动走 STARTTLS，两种均可。
 
+### 企业微信群机器人（微信推送，可选）
+
+除邮件外，还支持通过**企业微信群机器人 Webhook** 把通知直接推到微信，配置更简单（无需授权码）：
+
+1. 手机/电脑上打开**企业微信**，任意拉一个群（只有你自己也行）；个人可免费注册企业微信，无需真实公司。
+2. 群设置 →「**群机器人**」→「**添加机器人**」，起个名字（如“IMAX监控”）。
+3. 复制机器人的 **Webhook 地址**，形如
+   `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+4. 编辑 `config.py`：
+
+   | 配置项 | 说明 |
+   | --- | --- |
+   | `WECHAT_BOT_ENABLED` | 改为 `True` 开启微信推送 |
+   | `WECHAT_BOT_KEY` | Webhook 地址中 `key=` 后面那串字符（与 `WEBHOOK` 二选一） |
+   | `WECHAT_BOT_WEBHOOK` | 或直接填完整 Webhook 地址（优先级更高） |
+   | `WECHAT_BOT_MSGTYPE` | `text`=纯文本 / `markdown`=md 格式（标题加粗更好看） |
+
+5. 运行 `python monitor.py --test-mail` 验证，微信群里应能收到测试消息。
+
+> 两个渠道相互独立、互不影响：邮件未配置时自动模拟发送，微信未启用时自动跳过；某个渠道发送失败不影响另一个渠道。
+
 其余配置项（影院 ID、电影 ID、城市 ID、IMAX 关键词、轮询间隔）均已按本影院/本片填好，一般无需改动。
 
 ---
@@ -79,7 +100,7 @@ python monitor.py --once
 python monitor.py --report 2026-08-20
 python monitor.py --report            # 不带日期则默认查今天
 
-# 只发一封测试邮件验证邮箱配置，然后退出（排查邮件问题时用它）
+# 只发一条测试通知（邮件+企业微信机器人）验证配置，然后退出（排查通知问题时用它）
 python monitor.py --test-mail
 ```
 
@@ -138,6 +159,9 @@ crontab -e
 
 **Q：提示 `接口返回非 JSON（可能被猫眼风控拦截）`？**
 脚本只用一个移动端 User-Agent 访问猫眼排片接口，通常正常；若被风控，请降低 `POLL_INTERVAL`、检查网络/代理，稍后重试。
+
+**Q：微信推送报 `errcode=93000` 或收不到？**
+`93000` 表示 webhook key 不正确——重新复制机器人的完整 Webhook 地址，确认 `WECHAT_BOT_KEY` 没有多余空格/缺字符；若机器人被删除需重新添加并更新 key。其它 errcode 含义见企业微信机器人官方文档。
 
 **Q：邮件里没有票价？**
 猫眼对票价 `sellPr` 做了 **stonefont 字体反爬**（把数字编码成私有区字符），脚本为保持“单文件 `requests` 依赖”不做价格解码，票价请以邮件里的购票链接页面为准。

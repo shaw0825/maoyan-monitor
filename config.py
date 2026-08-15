@@ -59,3 +59,19 @@ MAIL_SUBJECT_PREFIX = "[奥德赛IMAX监控]"
 
 # 若 SMTP_PASSWORD 仍为占位符，脚本会自动进入“模拟发送”模式（只打印邮件内容，不真正发送），
 # 方便先跑通流程，等填好授权码后再真正发邮件。
+
+# =============================
+# 4. 企业微信群机器人通知（可选，与邮件通知并存）
+# =============================
+# 使用步骤：
+#   1. 手机/电脑上打开企业微信，任意拉一个群（只有你自己也行）；
+#   2. 群设置 -> 群机器人 -> 添加机器人，起个名字（如“IMAX监控”）；
+#   3. 复制机器人的 Webhook 地址，形如：
+#        https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#   4. 把 key=后面的那串字符填到 WECHAT_BOT_KEY（或把整个地址填到 WECHAT_BOT_WEBHOOK，二选一）；
+#   5. 把 WECHAT_BOT_ENABLED 改为 True。
+#   提示：个人可免费注册企业微信（自己建个“企业”即可），无需真实公司。
+WECHAT_BOT_ENABLED = False                          # 是否启用企业微信机器人推送
+WECHAT_BOT_WEBHOOK = ""                             # 完整 Webhook 地址（与 KEY 二选一，WEBHOOK 优先）
+WECHAT_BOT_KEY = ""                                 # Webhook 地址中 key= 后面的那串字符
+WECHAT_BOT_MSGTYPE = "text"                         # 消息类型：text=纯文本 / markdown=md格式（新场次通知用）

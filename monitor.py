@@ -26,11 +26,15 @@ import time
 from email.header import Header
 from email.mime.text import MIMEText
 
+import requests
+
 import config
 from maoyan import Maoyan
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, config.STATE_FILE if hasattr(config, "STATE_FILE") else "state.json")
+
+WECHAT_WEBHOOK_API = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
 
 # 购票链接（猫眼影院详情页）
 CINEMA_DETAIL_URL = "https://m.maoyan.com/cinema/{}".format(config.CINEMA_ID)
@@ -211,6 +215,104 @@ def send_email(subject, body):
     log("邮件已发送: {}".format(subject))
 
 
+# ---------- 企业微信群机器人 ----------
+def _wechat_webhook_url():
+    """从配置解析出完整的 Webhook 地址。"""
+    if getattr(config, "WECHAT_BOT_WEBHOOK", ""):
+        return config.WECHAT_BOT_WEBHOOK.strip()
+    key = (getattr(config, "WECHAT_BOT_KEY", "") or "").strip()
+    if not key:
+        raise ValueError("WECHAT_BOT_WEBHOOK / WECHAT_BOT_KEY 均未配置，无法推送微信")
+    return "{0}?key={1}".format(WECHAT_WEBHOOK_API, key)
+
+
+def wechat_dry_run():
+    """未启用或未填 key 时视为模拟模式。"""
+    return not (
+        getattr(config, "WECHAT_BOT_ENABLED", False)
+        and (getattr(config, "WECHAT_BOT_WEBHOOK", "") or getattr(config, "WECHAT_BOT_KEY", ""))
+    )
+
+
+def send_wechat_text(content):
+    """向企业微信群机器人推送一条消息（纯文本，≤2000字节，超长自动截断）。
+
+    content: str，纯文本内容。
+    """
+    if wechat_dry_run():
+        log("[模拟推送] 企业微信机器人未启用或未配置，仅打印内容：")
+        log("-" * 50)
+        log(content)
+        log("-" * 50)
+        return
+
+    url = _wechat_webhook_url()
+    msgtype = (getattr(config, "WECHAT_BOT_MSGTYPE", "text") or "text").lower()
+    if msgtype == "markdown":
+        payload = {"msgtype": "markdown", "markdown": {"content": content[:4096]}}
+    else:
+        payload = {"msgtype": "text", "text": {"content": content[:2000]}}
+    resp = requests.post(url, json=payload, timeout=config.REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    j = resp.json()
+    if j.get("errcode") != 0:
+        raise RuntimeError("企业微信机器人推送失败: errcode={} errmsg={}".format(
+            j.get("errcode"), j.get("errmsg")))
+
+
+# ---------- 统一通知（邮件 + 企业微信机器人） ----------
+def notify(subject, body):
+    """同时通过所有已启用的渠道发送通知；某个渠道失败不影响其它渠道。"""
+    errors = []
+
+    # 1) 邮件（保持原有行为：未配置授权码时自动进入模拟发送）
+    try:
+        send_email(subject, body)
+    except Exception as e:  # noqa: BLE001
+        errors.append("邮件: {}".format(e))
+
+    # 2) 企业微信群机器人
+    if not wechat_dry_run():
+        try:
+            # 标题加粗一行 + 正文，适合 markdown；text 类型也无损兼容
+            send_wechat_text("**{}**\n{}".format(subject, body))
+        except Exception as e:  # noqa: BLE001
+            errors.append("企业微信: {}".format(e))
+
+    if errors:
+        raise RuntimeError("部分通知渠道发送失败 -> " + " | ".join(errors))
+
+
+# ---------- 抓取失败告警 ----------
+FAILURE_NOTIFY_COOLDOWN = getattr(config, "FAILURE_NOTIFY_COOLDOWN", 3600)  # 秒；两次失败告警之间的最小间隔
+
+
+def notify_check_failure(err, last_notify_ts):
+    """抓取持续失败（短重试已用尽）时，按冷却时间发送一次失败告警，返回最新告警时间戳。"""
+    now = int(time.time())
+    if now - last_notify_ts < FAILURE_NOTIFY_COOLDOWN:
+        return last_notify_ts
+
+    subject = "{} 抓取失败告警".format(config.MAIL_SUBJECT_PREFIX)
+    body = (
+        "监控抓取猫眼排片失败（短重试已用尽）：\n\n"
+        "  时间：{}\n"
+        "  错误：{}\n\n"
+        "脚本会继续按 {} 秒间隔重试；若持续失败，请检查网络/代理，或降低轮询频率以免被猫眼风控。\n\n"
+        "—— 本邮件由奥德赛IMAX监控脚本自动发送"
+    ).format(
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        err,
+        config.POLL_INTERVAL,
+    )
+    try:
+        notify(subject, body)
+        return now
+    except Exception as ne:  # noqa: BLE001
+        log("失败告警发送出错：{}".format(ne))
+        return last_notify_ts
+
+
 # ---------- 单次检查 ----------
 def check_once(client, state):
     shows = fetch_imax_shows(client)
@@ -227,7 +329,7 @@ def check_once(client, state):
         log("首次运行：已建立基线，当前 IMAX 场次 {} 个".format(len(shows)))
         if config.NOTIFY_ON_START:
             subject = "{} 监测已启动".format(config.MAIL_SUBJECT_PREFIX)
-            send_email(subject, build_start_body(shows))
+            notify(subject, build_start_body(shows))
         return
 
     if new_shows:
@@ -236,7 +338,7 @@ def check_once(client, state):
         save_state(state)
         log("发现 {} 个新 IMAX 场次！".format(len(new_shows)))
         subject = "{} 发现 {} 个新场次".format(config.MAIL_SUBJECT_PREFIX, len(new_shows))
-        send_email(subject, build_body(new_shows))
+        notify(subject, build_body(new_shows))
     else:
         log("无新增 IMAX 场次（当前共 {} 个在售/待售）".format(len(shows)))
 
@@ -250,20 +352,23 @@ def check_once(client, state):
 def main():
     parser = argparse.ArgumentParser(description="猫眼《奥德赛》IMAX 场次监控")
     parser.add_argument("--once", action="store_true", help="只检查一次后退出")
-    parser.add_argument("--test-mail", action="store_true", help="只发一封测试邮件验证邮箱配置，然后退出")
+    parser.add_argument("--test-mail", action="store_true", help="发一封测试通知（邮件+企业微信机器人）验证配置，然后退出")
     parser.add_argument("--report", nargs="?", const="today", default=None, metavar="YYYY-MM-DD",
                         help="单次查询指定某天(缺省=今天)的《奥德赛》IMAX 场次，只打印到控制台不发邮件，然后退出")
     args = parser.parse_args()
 
     log("启动监控：影院={}({}) 电影={}({}) 城市={}".format(
         config.CINEMA_NAME, config.CINEMA_ID, config.MOVIE_NAME, config.MOVIE_ID, config.CITY_ID))
-    if is_dry_run() and args.report is None:
-        log("提示：当前为模拟发送模式，请在 config.py 中填入真实密码/授权码以真正发邮件。")
+    if (is_dry_run() or wechat_dry_run()) and args.report is None and not args.test_mail:
+        if is_dry_run():
+            log("提示：邮件为模拟发送模式，请在 config.py 中填入真实密码/授权码以真正发邮件。")
+        if wechat_dry_run():
+            log("提示：企业微信机器人未启用（WECHAT_BOT_ENABLED=False 或未填 KEY），如需微信推送请在 config.py 中配置。")
 
     if args.test_mail:
-        send_email("{} 测试邮件".format(config.MAIL_SUBJECT_PREFIX),
-                   "这是一封测试邮件：如果你收到它，说明邮件配置正确。")
-        log("测试邮件流程结束。")
+        notify("{} 测试通知".format(config.MAIL_SUBJECT_PREFIX),
+               "这是一条测试通知：如果你收到它（邮件或微信），说明通知配置正确。")
+        log("测试通知流程结束。")
         return
 
     if args.report is not None:
@@ -289,6 +394,7 @@ def main():
 
     client = Maoyan(timeout=config.REQUEST_TIMEOUT)
     state = load_state()
+    last_failure_notify = 0
 
     while True:
         try:
@@ -298,6 +404,7 @@ def main():
             break
         except Exception as e:  # noqa: BLE001
             log("检查出错：{}".format(e))
+            last_failure_notify = notify_check_failure(e, last_failure_notify)
 
         if args.once:
             break

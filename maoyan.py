@@ -21,6 +21,8 @@
   字体做了反爬编码，本客户端不解析价格（票价以猫眼页面为准）。
 """
 
+import time
+
 import requests
 
 HOST = "https://m.maoyan.com"
@@ -28,6 +30,23 @@ UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/604.1"
 )
+
+# 更接近真实移动端浏览器的请求头，降低被猫眼风控掐断的概率。
+# 注意 Accept-Encoding 只声明 gzip/deflate（requests 会自动解压），
+# 不声明 br，避免服务端返回 brotli 后 requests 无法自动解压。
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Referer": HOST + "/",
+    "Connection": "keep-alive",
+}
+
+# 短重试 + 指数退避：应对猫眼偶发的 SSL EOF / 连接重置 / 风控页。
+# 第 1、2、3 次失败后分别等待 RETRY_BACKOFF 对应的秒数（最后一次失败后直接抛出）。
+MAX_RETRIES = 3
+RETRY_BACKOFF = (1.0, 2.0, 4.0)
 
 
 class MaoyanError(RuntimeError):
@@ -38,22 +57,35 @@ class Maoyan:
     def __init__(self, timeout=20):
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": UA,
-            "Referer": HOST + "/",
-        })
+        self.session.headers.update(HEADERS)
 
-    # ---------- 底层请求 ----------
+    # ---------- 底层请求（带短重试 + 指数退避） ----------
     def _get(self, url, params):
-        resp = self.session.get(url, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        ct = resp.headers.get("content-type", "")
-        if "json" not in ct:
-            raise MaoyanError(
-                "接口返回非 JSON（可能被猫眼风控拦截），请稍后重试；"
-                "Content-Type={}".format(ct)
-            )
-        return resp.json()
+        last_err = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = self.session.get(url, params=params, timeout=self.timeout)
+                resp.raise_for_status()
+                ct = resp.headers.get("content-type", "")
+                if "json" in ct:
+                    return resp.json()
+                # 返回了 HTML（多半是风控页）：当作可重试的临时失败
+                last_err = MaoyanError(
+                    "接口返回非 JSON（可能被猫眼风控拦截），Content-Type={}".format(ct)
+                )
+            except requests.exceptions.HTTPError:
+                # 明确的 4xx/5xx 不重试，直接抛出
+                raise
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                last_err = e
+
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                time.sleep(wait)
+
+        raise MaoyanError("请求失败（已重试 {} 次）: {}".format(MAX_RETRIES, last_err))
 
     # ---------- 业务接口 ----------
     def get_cinema_shows(self, cinema_id, city_id):

@@ -2,8 +2,6 @@
 
 定时监控 **猫眼** 上 **MOViE MOViE 影城（前滩太古里店）** 里电影 **《奥德赛》(The Odyssey, 2026)** 的 **IMAX 场次**，一旦出现新场次就通过 **QQ 邮箱** 和/或 **企业微信群机器人（微信推送）** 通知你。
 
-本项目是对 [taopiaopiao-monitor](../taopiaopiao-monitor) 的“换数据源”改造：把对接淘票票 `acs.m.taopiaopiao.com` 的排片接口，替换为对接猫眼 `m.maoyan.com` 的排片接口，其余监控/去重/邮件逻辑保持一致。
-
 纯 `requests` 实现，无需浏览器、无需登录、无需签名，单文件依赖，适合 7×24 小时常驻运行。
 
 ---
